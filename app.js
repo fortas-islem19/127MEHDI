@@ -115,16 +115,20 @@
   /* ---------------- state ---------------- */
   var OFFERS = (C.OFFERS && C.OFFERS.length) ? C.OFFERS : [{ id: '1', qty: 1, title: 'علبة واحدة', price: 2900, oldPrice: 0 }];
   var DEFAULT_OFFER = OFFERS.filter(function (o) { return o.selected; })[0] || OFFERS[0];
-  var SHIP = C.SHIPPING || {};
+  var SHIP_TABLE = C.SHIPPING || {};
   var state = { offer: DEFAULT_OFFER, wilaya: '', delivery: 'home' };
+  function shipRate(code) {
+    var r = SHIP_TABLE[code] || SHIP_TABLE[String(+code)];
+    if (Array.isArray(r)) return { home: r[0], desk: r[1] };
+    return r || {};
+  }
 
+  // undefined = لم تُختر الولاية، null = غير متوفر، رقم = السعر
   function shippingFor(code, type, qty) {
     if (!code) return undefined;
+    var v = shipRate(code)[type];
+    if (v === null || v === undefined || v === '') return null;
     var free = +C.FREE_SHIPPING_FROM_QTY || 0;
-    var by = (SHIP.byWilaya || {})[code] || (SHIP.byWilaya || {})[String(+code)];
-    var rate = Object.assign({}, SHIP.default || {}, by || {});
-    var v = rate[type];
-    if (v === null || v === undefined || v === '') return null; // غير متوفر
     if (free && qty >= free) return 0;
     return +v;
   }
@@ -288,7 +292,11 @@
     }
 
     var o = state.offer, code = els.wilaya.value;
-    var ship = shippingFor(code, state.delivery, o.qty) || 0;
+    var ship = shippingFor(code, state.delivery, o.qty);
+    if (ship === null || ship === undefined) {
+      showMsg('عذراً، التوصيل غير متوفر حالياً لهذه الولاية. اختر طريقة توصيل أخرى أو اتصل بنا.');
+      return;
+    }
     var order = {
       orderId: makeOrderId(),
       product: C.PRODUCT_NAME || '',
