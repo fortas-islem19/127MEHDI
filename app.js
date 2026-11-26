@@ -101,6 +101,30 @@
       .then(function (r) { clearTimeout(timer); return r; }, function (e) { clearTimeout(timer); throw e; });
   }
 
+  /* ---------------- Google Sheets (Apps Script Web App) ---------------- */
+  var SHEET_URL = String(C.GOOGLE_SHEET_URL || '').trim();
+  function isSheetConfigured() {
+    return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec\/?$/.test(SHEET_URL);
+  }
+  function sendToGoogleSheet(data) {
+    var body = new URLSearchParams();
+    Object.keys(data).forEach(function (k) {
+      if (data[k] !== undefined && data[k] !== null) body.append(k, String(data[k]));
+    });
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 20000);
+    return fetch(SHEET_URL, { method: 'POST', mode: 'no-cors', body: body, signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) { clearTimeout(timer); return r; }, function (e) { clearTimeout(timer); throw e; });
+  }
+  function isOrderDestinationReady() { return isSheetConfigured() || isFormConfigured(); }
+  // يرسل الطلب إلى Google Sheets و/أو Google Form حسب ما هو مربوط في config.js
+  function sendOrder(data) {
+    var jobs = [];
+    if (isSheetConfigured()) jobs.push(sendToGoogleSheet(data));
+    if (isFormConfigured()) jobs.push(sendToGoogleForm(data));
+    return Promise.all(jobs);
+  }
+
   /* ---------------- traffic source ---------------- */
   var SOURCE = (function () {
     var q = new URLSearchParams(location.search), parts = [];
@@ -325,9 +349,9 @@
     if (els.hp.value) return; // روبوت
     if (!validate()) return;
 
-    if (!isFormConfigured()) {
-      showMsg('⚠️ الفورم غير مربوط بـ Google Form بعد — أضف FORM_ID وأرقام entry في ملف config.js');
-      console.warn('[Almes & Racim] Google Form غير مربوط: راجع GOOGLE_FORM في config.js');
+    if (!isOrderDestinationReady()) {
+      showMsg('⚠️ الطلبات غير مربوطة بعد — ضع رابط GOOGLE_SHEET_URL (أو Google Form) في ملف config.js');
+      console.warn('[Almes & Racim] لا يوجد Google Sheet ولا Google Form مربوط: راجع config.js');
       return;
     }
 
@@ -355,7 +379,7 @@
 
     submitting = true;
     setLoading(true);
-    sendToGoogleForm(order)
+    sendOrder(order)
       .then(function () {
         track(C.PIXEL_ORDER_EVENT || 'Purchase', {
           value: order.total,
@@ -446,7 +470,7 @@
 
   // setup reminder (يختفي بعد إكمال الإعداد)
   var missing = [];
-  if (!isFormConfigured()) missing.push('Google Form');
+  if (!isOrderDestinationReady()) missing.push('Google Sheets');
   if (!pixelIds().length) missing.push('Facebook Pixel');
   if (missing.length) {
     var w = $('#setupWarning');
