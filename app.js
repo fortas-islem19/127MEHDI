@@ -118,7 +118,7 @@
   var SHIP_TABLE = C.SHIPPING || {};
   var state = { offer: DEFAULT_OFFER, wilaya: '', delivery: 'home' };
   function shipRate(code) {
-    var r = SHIP_TABLE[code] || SHIP_TABLE[String(+code)];
+    var r = SHIP_TABLE[code] || SHIP_TABLE[String(+code)] || C.SHIPPING_ALL;
     if (Array.isArray(r)) return { home: r[0], desk: r[1] };
     return r || {};
   }
