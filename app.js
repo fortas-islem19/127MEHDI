@@ -125,6 +125,19 @@
     return Promise.all(jobs);
   }
 
+  /* ---------------- Meta cookies (لـ Conversions API) ---------------- */
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/[.$?*|{}()[\]\\/+^]/g, '\\$&') + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+  var PAGE_LOADED_AT = Date.now();
+  function getFbc() {
+    var c = getCookie('_fbc');
+    if (c) return c;
+    var id = new URLSearchParams(location.search).get('fbclid');
+    return id ? 'fb.1.' + PAGE_LOADED_AT + '.' + id : '';
+  }
+
   /* ---------------- traffic source ---------------- */
   var SOURCE = (function () {
     var q = new URLSearchParams(location.search), parts = [];
@@ -374,7 +387,14 @@
       shipping: ship,
       total: sub + ship,
       note: els.note.value.trim(),
-      source: SOURCE
+      source: SOURCE,
+      // بيانات إضافية لـ Conversions API (لا تظهر في الجدول)
+      productId: p.id,
+      eventName: C.PIXEL_ORDER_EVENT || 'Purchase',
+      fbp: getCookie('_fbp'),
+      fbc: getFbc(),
+      ua: navigator.userAgent,
+      url: location.href
     };
 
     submitting = true;
