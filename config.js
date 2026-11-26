@@ -24,7 +24,7 @@ window.CONFIG = {
      ضع رابط Web App الذي تحصل عليه بعد نشر السكريبت (ينتهي بـ /exec)
      الكود جاهز في ملف google-apps-script.gs والخطوات في README.md
      ------------------------------------------------------------------ */
-  GOOGLE_SHEET_URL: '', // ← مثال: 'https://script.google.com/macros/s/AKfycb.../exec'
+  GOOGLE_SHEET_URL: 'https://script.google.com/macros/s/AKfycbxW509ZY6UC9W9BxWt-xzEC1OhJ754Q0AipxvHaO77XiGX-NVnJC4DdFamzzTTRXI4f4w/exec',
 
   /* ------------------------------------------------------------------
      2-ب) Google Form (بديل — لا تحتاجه إذا استعملت Google Sheets أعلاه)
