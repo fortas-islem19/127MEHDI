@@ -4,6 +4,7 @@
 
   var C = window.CONFIG || {};
   var CUR = C.CURRENCY_LABEL || 'دج';
+  var CURRENCY = C.CURRENCY || 'DZD';
 
   var WILAYAS = [
     ['01', 'أدرار'], ['02', 'الشلف'], ['03', 'الأغواط'], ['04', 'أم البواقي'], ['05', 'باتنة'],
@@ -100,6 +101,30 @@
       .then(function (r) { clearTimeout(timer); return r; }, function (e) { clearTimeout(timer); throw e; });
   }
 
+  /* ---------------- Google Sheets (Apps Script Web App) ---------------- */
+  var SHEET_URL = String(C.GOOGLE_SHEET_URL || '').trim();
+  function isSheetConfigured() {
+    return /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec\/?$/.test(SHEET_URL);
+  }
+  function sendToGoogleSheet(data) {
+    var body = new URLSearchParams();
+    Object.keys(data).forEach(function (k) {
+      if (data[k] !== undefined && data[k] !== null) body.append(k, String(data[k]));
+    });
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 20000);
+    return fetch(SHEET_URL, { method: 'POST', mode: 'no-cors', body: body, signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) { clearTimeout(timer); return r; }, function (e) { clearTimeout(timer); throw e; });
+  }
+  function isOrderDestinationReady() { return isSheetConfigured() || isFormConfigured(); }
+  // يرسل الطلب إلى Google Sheets و/أو Google Form حسب ما هو مربوط في config.js
+  function sendOrder(data) {
+    var jobs = [];
+    if (isSheetConfigured()) jobs.push(sendToGoogleSheet(data));
+    if (isFormConfigured()) jobs.push(sendToGoogleForm(data));
+    return Promise.all(jobs);
+  }
+
   /* ---------------- traffic source ---------------- */
   var SOURCE = (function () {
     var q = new URLSearchParams(location.search), parts = [];
@@ -112,22 +137,33 @@
     return parts.join(' / ') || 'direct';
   })();
 
-  /* ---------------- state ---------------- */
-  var OFFERS = (C.OFFERS && C.OFFERS.length) ? C.OFFERS : [{ id: '1', qty: 1, title: 'علبة واحدة', price: 2900, oldPrice: 0 }];
-  var DEFAULT_OFFER = OFFERS.filter(function (o) { return o.selected; })[0] || OFFERS[0];
-  var SHIP = C.SHIPPING || {};
-  var state = { offer: DEFAULT_OFFER, wilaya: '', delivery: 'home' };
+  /* ---------------- products & shipping ---------------- */
+  var PRODUCTS = (C.PRODUCTS || []).filter(function (p) { return p && p.id && +p.price > 0; });
+  if (!PRODUCTS.length) PRODUCTS = [{ id: 'box', name: 'بوكس المفاجآت', price: 0, items: [] }];
+  var DEFAULT_PRODUCT = PRODUCTS.filter(function (p) { return p.selected; })[0] || PRODUCTS[0];
+  var MIN_PRICE = Math.min.apply(null, PRODUCTS.map(function (p) { return +p.price; }));
+  var MAX_QTY = Math.max(1, +C.MAX_QTY || 5);
+  function productById(id) {
+    return PRODUCTS.filter(function (p) { return String(p.id) === String(id); })[0];
+  }
 
+  var SHIP_TABLE = C.SHIPPING || {};
+  function shipRate(code) {
+    var r = SHIP_TABLE[code] || SHIP_TABLE[String(+code)] || C.SHIPPING_ALL;
+    if (Array.isArray(r)) return { home: r[0], desk: r[1] };
+    return r || {};
+  }
+  // undefined = لم تُختر الولاية، null = غير متوفر، رقم = السعر
   function shippingFor(code, type, qty) {
     if (!code) return undefined;
+    var v = shipRate(code)[type];
+    if (v === null || v === undefined || v === '') return null;
     var free = +C.FREE_SHIPPING_FROM_QTY || 0;
-    var by = (SHIP.byWilaya || {})[code] || (SHIP.byWilaya || {})[String(+code)];
-    var rate = Object.assign({}, SHIP.default || {}, by || {});
-    var v = rate[type];
-    if (v === null || v === undefined || v === '') return null; // غير متوفر
     if (free && qty >= free) return 0;
     return +v;
   }
+
+  var state = { product: DEFAULT_PRODUCT, qty: 1, wilaya: '', delivery: 'home' };
 
   /* ---------------- DOM ---------------- */
   var form = $('#orderForm');
@@ -136,49 +172,79 @@
     commune: $('#f-commune'), note: $('#f-note'), hp: form.querySelector('.hp'),
     home: form.querySelector('input[name=delivery][value=home]'),
     desk: form.querySelector('input[name=delivery][value=desk]'),
+    qtyVal: $('#qtyVal'), qtyMinus: $('[data-qty="-1"]'), qtyPlus: $('[data-qty="1"]'),
     btn: $('#submitBtn'), msg: $('#formMsg')
   };
 
-  // wilayas
   WILAYAS.forEach(function (w) {
     var o = document.createElement('option');
     o.value = w[0]; o.textContent = w[0] + ' - ' + w[1];
     els.wilaya.appendChild(o);
   });
 
-  // offers
-  function renderOffers() {
-    var box = $('#offers');
-    box.innerHTML = OFFERS.map(function (o) {
-      return '<label class="offer">' +
-        '<input type="radio" name="offer" value="' + esc(o.id) + '">' +
+  function shortItems(p) {
+    var it = p.items || [];
+    return it.slice(0, 3).join('، ') + (it.length > 3 ? '…' : '');
+  }
+
+  // بطاقات البوكسات داخل الفورم
+  function renderProductOptions() {
+    $('#products').innerHTML = PRODUCTS.map(function (p) {
+      return '<label class="offer product-opt">' +
+        '<input type="radio" name="product" value="' + esc(p.id) + '">' +
         '<span class="offer-radio" aria-hidden="true"></span>' +
-        '<span class="offer-info"><b>' + esc(o.title) + '</b><small>' + esc(o.subtitle || ('بوكس كامل × ' + o.qty)) + '</small></span>' +
-        '<span class="offer-price"><b>' + priceText(o.price) + '</b>' +
-          (o.oldPrice > o.price ? '<s>' + priceText(o.oldPrice) + '</s>' : '') + '</span>' +
-        (o.badge ? '<span class="offer-badge">' + esc(o.badge) + '</span>' : '') +
+        (p.image ? '<img class="product-thumb" src="' + esc(p.image) + '" alt="" width="80" height="60" loading="lazy">' : '') +
+        '<span class="offer-info"><b>' + esc(p.name) + '</b><small>' + esc(shortItems(p)) + '</small>' +
+          '<span class="product-price">' + priceText(p.price) + '</span></span>' +
+        (p.badge ? '<span class="offer-badge">' + esc(p.badge) + '</span>' : '') +
         '</label>';
     }).join('');
   }
-  function selectOffer(o) {
-    state.offer = o;
-    $$('.offer', form).forEach(function (label) {
+
+  // قسم "اختر البوكس" بالصور والمحتوى
+  function renderBoxCards() {
+    var grid = $('#boxesGrid');
+    if (!grid) return;
+    grid.innerHTML = PRODUCTS.map(function (p) {
+      return '<article class="box-card" data-box="' + esc(p.id) + '">' +
+        (p.badge ? '<span class="box-badge">' + esc(p.badge) + '</span>' : '') +
+        (p.image ? '<div class="box-img"><img src="' + esc(p.image) + '" alt="' + esc(p.name) + '" width="900" height="675" loading="lazy"></div>' : '') +
+        '<div class="box-body">' +
+          '<div class="box-head"><h3>' + esc(p.name) + '</h3><span class="box-price">' + priceText(p.price) + '</span></div>' +
+          '<ul class="box-items">' + (p.items || []).map(function (i) { return '<li>' + esc(i) + '</li>'; }).join('') + '</ul>' +
+          '<button type="button" class="btn-pick" data-pick="' + esc(p.id) + '">اختر هذا البوكس</button>' +
+        '</div>' +
+      '</article>';
+    }).join('');
+  }
+
+  function selectProduct(p) {
+    state.product = p;
+    $$('.product-opt', form).forEach(function (label) {
       var input = label.querySelector('input');
-      var on = input.value === String(o.id);
+      var on = input.value === String(p.id);
       input.checked = on;
       label.classList.toggle('is-selected', on);
     });
+    $$('.box-card').forEach(function (card) {
+      var on = card.getAttribute('data-box') === String(p.id);
+      card.classList.toggle('is-selected', on);
+      var b = card.querySelector('.btn-pick');
+      if (b) b.textContent = on ? '✓ تم اختياره' : 'اختر هذا البوكس';
+    });
   }
 
-  // hero prices
-  function fillPrices() {
-    var o = OFFERS[0];
-    $$('[data-price]').forEach(function (el) { el.textContent = money(o.price); });
+  function setQty(n) {
+    state.qty = Math.min(MAX_QTY, Math.max(1, n));
+    els.qtyVal.textContent = state.qty;
+    els.qtyMinus.disabled = state.qty <= 1;
+    els.qtyPlus.disabled = state.qty >= MAX_QTY;
+  }
+
+  function fillStaticPrices() {
+    $$('[data-min-price]').forEach(function (el) { el.textContent = money(MIN_PRICE); });
     $$('[data-cur]').forEach(function (el) { el.textContent = CUR; });
-    var save = o.oldPrice > o.price ? o.oldPrice - o.price : 0;
-    $$('[data-old-price]').forEach(function (el) { el.textContent = money(o.oldPrice); });
-    $$('[data-save]').forEach(function (el) { el.textContent = money(save); });
-    $$('[data-old-wrap],[data-save-wrap]').forEach(function (el) { el.hidden = !save; });
+    $$('[data-box-count]').forEach(function (el) { el.textContent = PRODUCTS.length; });
   }
 
   function shipLabel(v) {
@@ -188,8 +254,9 @@
   }
 
   function update() {
-    var o = state.offer, code = state.wilaya;
-    var home = shippingFor(code, 'home', o.qty), desk = shippingFor(code, 'desk', o.qty);
+    var p = state.product, qty = state.qty, code = state.wilaya;
+    var sub = p.price * qty;
+    var home = shippingFor(code, 'home', qty), desk = shippingFor(code, 'desk', qty);
     els.home.disabled = !!(code && home === null);
     els.desk.disabled = !!(code && desk === null);
     if (state.delivery === 'desk' && els.desk.disabled && !els.home.disabled) { els.home.checked = true; state.delivery = 'home'; }
@@ -197,10 +264,11 @@
     form.querySelector('[data-ship=home]').textContent = shipLabel(home);
     form.querySelector('[data-ship=desk]').textContent = shipLabel(desk);
 
-    var ship = shippingFor(code, state.delivery, o.qty);
-    $('#sumProducts').textContent = priceText(o.price);
+    var ship = shippingFor(code, state.delivery, qty);
+    $('#sumProductLabel').textContent = p.name + ' × ' + qty;
+    $('#sumProducts').textContent = priceText(sub);
     $('#sumShipping').textContent = !code ? 'اختر الولاية' : (ship === 0 ? 'مجاني 🎉' : (ship === null ? '—' : priceText(ship)));
-    $('#sumTotal').textContent = priceText(o.price + (ship || 0));
+    $('#sumTotal').textContent = priceText(sub + (ship || 0));
   }
 
   /* ---------------- validation ---------------- */
@@ -257,7 +325,7 @@
   function openThanks(order) {
     $('#tName').textContent = order.name.split(' ')[0];
     $('#tId').textContent = order.orderId;
-    $('#tQty').textContent = state.offer.title;
+    $('#tProduct').textContent = order.product + ' × ' + order.quantity;
     $('#tWilaya').textContent = order.wilaya;
     $('#tTotal').textContent = priceText(order.total);
     $('#tPhone').textContent = order.phone;
@@ -281,45 +349,52 @@
     if (els.hp.value) return; // روبوت
     if (!validate()) return;
 
-    if (!isFormConfigured()) {
-      showMsg('⚠️ الفورم غير مربوط بـ Google Form بعد — أضف FORM_ID وأرقام entry في ملف config.js');
-      console.warn('[Almes & Racim] Google Form غير مربوط: راجع GOOGLE_FORM في config.js');
+    if (!isOrderDestinationReady()) {
+      showMsg('⚠️ الطلبات غير مربوطة بعد — ضع رابط GOOGLE_SHEET_URL (أو Google Form) في ملف config.js');
+      console.warn('[Almes & Racim] لا يوجد Google Sheet ولا Google Form مربوط: راجع config.js');
       return;
     }
 
-    var o = state.offer, code = els.wilaya.value;
-    var ship = shippingFor(code, state.delivery, o.qty) || 0;
+    var p = state.product, qty = state.qty, code = els.wilaya.value;
+    var ship = shippingFor(code, state.delivery, qty);
+    if (ship === null || ship === undefined) {
+      showMsg('عذراً، التوصيل غير متوفر حالياً لهذه الولاية. اختر طريقة توصيل أخرى أو اتصل بنا.');
+      return;
+    }
+    var sub = p.price * qty;
     var order = {
       orderId: makeOrderId(),
-      product: C.PRODUCT_NAME || '',
+      product: p.name,
       name: els.name.value.trim(),
       phone: normalizePhone(els.phone.value),
       wilaya: code + ' - ' + wilayaName(code),
       commune: els.commune.value.trim(),
       delivery: state.delivery === 'desk' ? 'مكتب (Stop desk)' : 'المنزل',
-      quantity: o.qty,
+      quantity: qty,
       shipping: ship,
-      total: o.price + ship,
+      total: sub + ship,
       note: els.note.value.trim(),
       source: SOURCE
     };
 
     submitting = true;
     setLoading(true);
-    sendToGoogleForm(order)
+    sendOrder(order)
       .then(function () {
         track(C.PIXEL_ORDER_EVENT || 'Purchase', {
           value: order.total,
-          currency: C.CURRENCY || 'DZD',
-          content_name: C.PRODUCT_NAME,
-          content_ids: [C.PRODUCT_ID],
+          currency: CURRENCY,
+          content_name: p.name,
+          content_ids: [p.id],
+          contents: [{ id: p.id, quantity: qty, item_price: p.price }],
           content_type: 'product',
-          num_items: o.qty
+          num_items: qty
         }, order.orderId);
         openThanks(order);
         form.reset();
         state.wilaya = ''; state.delivery = 'home';
-        selectOffer(DEFAULT_OFFER);
+        selectProduct(DEFAULT_PRODUCT);
+        setQty(1);
         update();
       })
       .catch(function () {
@@ -331,9 +406,9 @@
   /* ---------------- events ---------------- */
   form.addEventListener('change', function (e) {
     var t = e.target;
-    if (t.name === 'offer') {
-      var o = OFFERS.filter(function (x) { return String(x.id) === t.value; })[0];
-      if (o) selectOffer(o);
+    if (t.name === 'product') {
+      var p = productById(t.value);
+      if (p) selectProduct(p);
     } else if (t.name === 'wilaya') {
       state.wilaya = t.value;
     } else if (t.name === 'delivery') {
@@ -342,14 +417,32 @@
     update();
   });
 
+  form.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-qty]');
+    if (!b) return;
+    setQty(state.qty + (+b.getAttribute('data-qty')));
+    update();
+  });
+
+  // زر "اختر هذا البوكس" في قسم البوكسات
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-pick]');
+    if (!b) return;
+    var p = productById(b.getAttribute('data-pick'));
+    if (!p) return;
+    selectProduct(p);
+    update();
+    $('#products').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+
   // البيكسل: بداية ملء الفورم (مرة واحدة)
   var started = false;
   function onStart() {
     if (started) return;
     started = true;
     track('InitiateCheckout', {
-      value: state.offer.price, currency: C.CURRENCY || 'DZD',
-      content_ids: [C.PRODUCT_ID], content_type: 'product', num_items: state.offer.qty
+      value: state.product.price * state.qty, currency: CURRENCY,
+      content_ids: [state.product.id], content_type: 'product', num_items: state.qty
     });
   }
   form.addEventListener('focusin', onStart);
@@ -377,7 +470,7 @@
 
   // setup reminder (يختفي بعد إكمال الإعداد)
   var missing = [];
-  if (!isFormConfigured()) missing.push('Google Form');
+  if (!isOrderDestinationReady()) missing.push('Google Sheets');
   if (!pixelIds().length) missing.push('Facebook Pixel');
   if (missing.length) {
     var w = $('#setupWarning');
@@ -387,16 +480,18 @@
 
   /* ---------------- init ---------------- */
   $('#year').textContent = new Date().getFullYear();
-  renderOffers();
-  selectOffer(DEFAULT_OFFER);
-  fillPrices();
+  renderProductOptions();
+  renderBoxCards();
+  selectProduct(DEFAULT_PRODUCT);
+  setQty(1);
+  fillStaticPrices();
   update();
 
   track('ViewContent', {
-    content_name: C.PRODUCT_NAME,
-    content_ids: [C.PRODUCT_ID],
+    content_name: 'بوكسات المفاجآت',
+    content_ids: PRODUCTS.map(function (p) { return p.id; }),
     content_type: 'product',
-    value: DEFAULT_OFFER.price,
-    currency: C.CURRENCY || 'DZD'
+    value: DEFAULT_PRODUCT.price,
+    currency: CURRENCY
   });
 })();
